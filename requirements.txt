@@ -1,0 +1,7 @@
+chainer>=5.2.0
+cython>=0.24
+numpy>=1.15.0
+tqdm
+h5py
+-e git+https://github.com/chantera/chainer_nn@fef54774916300800a2d019d6ab36c80c64c802a#egg=chainer_nn
+-e git+https://github.com/chantera/teras@13f831af305b055b43d2336e1ff747d4d876088c#egg=teras
