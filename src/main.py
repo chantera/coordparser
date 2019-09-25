@@ -33,8 +33,10 @@ def train(
         encoder_input=('char', 'postag'),
         model_config=None,
         device=-1,
-        save_dir=None, seed=None, cache_dir='', refresh_cache=False,
-        listeners=None):
+        save_dir=None,
+        seed=None,
+        cache_dir='',
+        refresh_cache=False):
     if seed is not None:
         utils.set_random_seed(seed, device)
     logger = logging.getLogger()
@@ -105,12 +107,6 @@ def train(
 
     trainer = training.Trainer(optimizer, model, loss_func=model.compute_loss)
     trainer.configure(utils.training_config)
-    if listeners is not None:
-        for listener in listeners:
-            priority = 100
-            if isinstance(listener, (tuple, list)):
-                listener, priority = listener
-            trainer.add_listener(listener, priority)
     trainer.add_listener(
         training.listeners.ProgressBar(lambda n: tqdm(total=n)), priority=200)
     trainer.add_hook(
