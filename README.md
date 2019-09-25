@@ -191,7 +191,7 @@ Unlike training/development files for training, a sentence can contain quotation
 @inproceedings{teranishi:2019:naacl,
   title={Decomposed Local Models for Coordinate Structure Parsing},
   author={Teranishi, Hiroki and Shindo, Hiroyuki and Matsumoto, Yuji},
-  booktitle={Proceedings of the 2019 Conference of the North {A}merican Chapter of the Association for Computational Linguistics: Human Language Technologies, Volume 1 (Long and Short Papers)},
+  booktitle={Proceedings of the 2019 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies, Volume 1 (Long and Short Papers)},
   year={2019},
   location={Minneapolis, Minnesota},
   publisher={Association for Computational Linguistics},
