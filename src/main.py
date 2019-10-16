@@ -55,14 +55,14 @@ def train(
         cache_options=dict(dir=cache_dir, mkdir=True, logger=logger),
         extra_ids=(git.hash(),))
 
-    use_extenal_postags = not read_genia
+    use_external_postags = not read_genia
     cont_embed_file_ext = _get_cont_embed_file_ext(encoder_input)
     use_cont_embed = cont_embed_file_ext is not None
 
     train_dataset = loader.load_with_external_resources(
         train_file, train=True, bucketing=False,
         size=None if limit < 0 else limit, refresh_cache=refresh_cache,
-        use_extenal_postags=use_extenal_postags,
+        use_external_postags=use_external_postags,
         use_contextualized_embed=use_cont_embed,
         contextualized_embed_file_ext=cont_embed_file_ext)
     logging.info('{} samples loaded for training'.format(len(train_dataset)))
@@ -72,7 +72,7 @@ def train(
             test_file, train=False, bucketing=False,
             size=None if limit < 0 else limit // 10,
             refresh_cache=refresh_cache,
-            use_extenal_postags=use_extenal_postags,
+            use_external_postags=use_external_postags,
             use_contextualized_embed=use_cont_embed,
             contextualized_embed_file_ext=cont_embed_file_ext)
         logging.info('{} samples loaded for validation'
@@ -141,14 +141,14 @@ def test(model_file, test_file, filter_type=True, limit=-1, device=-1):
     encoder_input = context.encoder_input
 
     read_genia = loader._read_genia
-    use_extenal_postags = not read_genia
+    use_external_postags = not read_genia
     cont_embed_file_ext = _get_cont_embed_file_ext(encoder_input)
     use_cont_embed = cont_embed_file_ext is not None
 
     test_dataset = loader.load_with_external_resources(
         test_file, train=False, bucketing=False,
         size=None if limit < 0 else limit,
-        use_extenal_postags=use_extenal_postags,
+        use_external_postags=use_external_postags,
         use_contextualized_embed=use_cont_embed,
         contextualized_embed_file_ext=cont_embed_file_ext)
     logging.info('{} samples loaded for test'.format(len(test_dataset)))

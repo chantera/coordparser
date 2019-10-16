@@ -163,14 +163,14 @@ class DataLoader(CachedTextLoader):
     def load_with_external_resources(
             self, file, train=False, size=None, bucketing=False,
             refresh_cache=False,
-            use_extenal_postags=False,
+            use_external_postags=False,
             use_contextualized_embed=False,
             postag_file_ext='.tag.ssv',
             contextualized_embed_file_ext='.hdf5',
             logger=None,
     ):
         postag_file = None
-        if use_extenal_postags:
+        if use_external_postags:
             postag_file = _find_file(file, postag_file_ext)
             if postag_file is not None and logger is not None:
                 logger.info('load postags from {}'.format(postag_file))
