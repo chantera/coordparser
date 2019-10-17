@@ -156,7 +156,7 @@ class DataLoader(CachedTextLoader):
             extra_ids=files[1:], refresh_cache=refresh_cache)
         if self._updated and self._cache_io is not None:
             self.update_cache()
-        self._postag_f = self._cont_embed_file = None
+        self._postag_file = self._cont_embed_file = None
         self._updated = False
         return dataset
 
