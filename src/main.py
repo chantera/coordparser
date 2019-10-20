@@ -7,11 +7,10 @@ from teras.utils import git, logging
 from tqdm import tqdm
 
 import dataset
-import utils
-
 import eval as eval_module
 import models
 import parsers
+import utils
 
 
 chainer.Variable.__int__ = lambda self: int(self.data)
