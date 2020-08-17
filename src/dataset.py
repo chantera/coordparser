@@ -10,7 +10,7 @@ from teras.preprocessing import text
 
 
 _CHAR_PAD = "<PAD>"
-CC_KEY = ["and", "or", "but", "nor", "and\/or"]
+CC_KEY = ["and", "or", "but", "nor", "and/or"]
 CC_SEP = [",", ";", ":"]
 
 

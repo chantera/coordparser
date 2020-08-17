@@ -21,6 +21,7 @@ def clean_tree(tree, exclusion=None):
         if label in exclusion:
             index -= 1
         elif len(node) == 2 and isinstance(node[1], str):  # Leaf
+            node[1] = node[1].replace('\/', '/')  # NOQA
             words.append(node[1])
             span = (begin, index)
         else:  # Node

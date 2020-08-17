@@ -23,7 +23,7 @@ class Grammar(cky.Grammar):
         ("CC", "or"),
         ("CC", "but"),
         ("CC", "nor"),
-        ("CC", "and\/or"),
+        ("CC", "and/or"),
         ("CC-SEP", ","),
         ("CC-SEP", ";"),
         ("CC-SEP", ":"),
