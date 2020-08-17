@@ -60,24 +60,29 @@ class FeatureExtractor2(FeatureExtractor):
         ends_post = ends + 1
         ckeys_pre = ckeys - 1
         ckeys_post = ckeys + 1
+        to_cpu = chainer.cuda.to_cpu
 
         @functools.lru_cache(maxsize=None)
         def _get_span_v(i, j):
             return F.average(hs_flatten[i:j + 1], axis=0)
 
         left_spans = F.vstack([_get_span_v(begin, ckey_pre)
-                               for begin, ckey_pre in zip(begins, ckeys_pre)])
+                               for begin, ckey_pre
+                               in zip(to_cpu(begins), to_cpu(ckeys_pre))])
         right_spans = F.vstack([_get_span_v(ckey_post, end)
-                                for ckey_post, end in zip(ckeys_post, ends)])
+                                for ckey_post, end
+                                in zip(to_cpu(ckeys_post), to_cpu(ends))])
         h_b = F.embed_id(begins, hs_flatten)
         h_b_pre = F.embed_id(begins_pre, hs_flatten, ignore_label=-1)
-        out_of_span = np.insert(lengths[:-1].cumsum(), 0, 0) - 1
-        h_b_pre = F.where(np.isin(begins_pre, out_of_span)[:, None],
+        out_of_span = np.insert(to_cpu(lengths[:-1].cumsum()), 0, 0) - 1
+        is_in = np.isin(to_cpu(begins_pre), out_of_span)
+        h_b_pre = F.where(xp.asarray(is_in)[:, None],
                           xp.zeros_like(h_b_pre.data), h_b_pre)
         h_e = F.embed_id(ends, hs_flatten)
         h_e_post = F.embed_id(ends_post, hs_flatten, hs_flatten.shape[0])
         out_of_span = lengths.cumsum()
-        h_e_post = F.where(np.isin(ends_post, out_of_span)[:, None],
+        is_in = np.isin(to_cpu(ends_post), to_cpu(out_of_span))
+        h_e_post = F.where(xp.asarray(is_in)[:, None],
                            xp.zeros_like(h_e_post.data), h_e_post)
         h_k_pre = F.embed_id(ckeys_pre, hs_flatten)
         h_k_post = F.embed_id(ckeys_post, hs_flatten)
