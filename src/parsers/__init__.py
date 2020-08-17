@@ -9,7 +9,7 @@ def build_parser(loader, model):
     word_vocab = loader.get_processor('word').vocab
     if isinstance(model, Teranishi17):
         parser = Teranishi17Parser(
-            model, comma_id=word_vocab[','])
+            model, comma_id=word_vocab.get(','))
     elif isinstance(model, Teranishi19):
         grammar = Grammar(word_vocab)
         parser = CkyParser(model, grammar)
