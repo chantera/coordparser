@@ -45,6 +45,7 @@ def train(
 
     read_genia = format == 'genia'
     loader = dataset.DataLoader.build(
+        word_embed_size=model_config.get('word_embed_size', 100),
         postag_embed_size=model_config.get('postag_embed_size', 50),
         char_embed_size=model_config.get('char_embed_size', 10),
         word_embed_file=embed_file,
