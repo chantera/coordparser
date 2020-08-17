@@ -10,7 +10,7 @@ from teras.preprocessing import text
 
 
 _CHAR_PAD = "<PAD>"
-CC_KEY = ["and", "or", "but", "nor", "and\/or"]
+CC_KEY = ["and", "or", "but", "nor", "and/or"]
 CC_SEP = [",", ";", ":"]
 
 
@@ -265,8 +265,16 @@ class GeniaReader(reader.Reader):
     def __next__(self):
         try:
             sentence = self._iterator.__next__()
-            coord = self._coord_iterator.__next__()
-            return (sentence, coord)
+            coords = self._coord_iterator.__next__()
+            if coords:
+                words = [token['word'] for token in sentence]
+                for coord in coords.values():
+                    if coord is None or len(coord.conjuncts) <= 2:
+                        continue
+                    assert len(coord.seps) == 0
+                    seps = _find_separators(words, coord.cc, coord.conjuncts)
+                    coord.seps = tuple(seps)
+            return (sentence, coords)
         except Exception as e:
             self.reset()
             raise e
@@ -399,24 +407,7 @@ def _extract(tree):
                     cc = child_span[0]
                 index = child_span[1] + 1
             if cc is not None and len(conjuncts) >= 2:
-                seps = []
-                if len(conjuncts) > 2:
-                    # find separators
-                    for i in range(1, len(conjuncts) - 1):
-                        sep = _find_separator(words,
-                                              conjuncts[i - 1][1] + 1,
-                                              conjuncts[i][0],
-                                              search_len=2)
-                        if sep is None:
-                            warnings.warn(
-                                "Could not find separator: "
-                                "left conjunct={}, right conjunct={}, "
-                                "range: {}".format(
-                                    conjuncts[i - 1], conjuncts[i],
-                                    words[conjuncts[i - 1][0]:
-                                          conjuncts[i][1] + 1]))
-                            continue
-                        seps.append(sep)
+                seps = _find_separators(words, cc, conjuncts)
                 coords[cc] = Coordination(cc, conjuncts, seps, label)
             index -= 1
         span = (begin, index)
@@ -428,6 +419,29 @@ def _extract(tree):
 
     _traverse(tree[0] if len(tree) == 1 else tree, index=0)
     return words, postags, spans, coords
+
+
+def _find_separators(words, cc, conjuncts):
+    seps = []
+    if len(conjuncts) > 2:
+        for i in range(1, len(conjuncts) - 1):
+            sep = _find_separator(words,
+                                  conjuncts[i - 1][1] + 1,
+                                  conjuncts[i][0],
+                                  search_len=2)
+            if sep is None:
+                warnings.warn(
+                    "Could not find separator: "
+                    "left conjunct={}, right conjunct={}, "
+                    "range: {}".format(
+                        conjuncts[i - 1], conjuncts[i],
+                        words[conjuncts[i - 1][0]:
+                              conjuncts[i][1] + 1]))
+                continue
+            elif sep == cc:
+                continue
+            seps.append(sep)
+    return seps
 
 
 def _find_separator(words, search_from, search_to, search_len=2):

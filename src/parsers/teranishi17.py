@@ -14,6 +14,7 @@ class Teranishi17Parser(Parser):
         if not isinstance(model, Teranishi17):
             raise ValueError("Unsupported model: {}"
                              .format(model.__class__.__name__))
+        assert comma_id is not None
         self.model = model
         self.comma_id = comma_id
         self.decoding = decoding
