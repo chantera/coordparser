@@ -83,10 +83,13 @@ class Teranishi17(common.CoordSolver):
                     indices.append(idx)
                 k += 1
 
-        scores = F.pad_sequence(scores, padding=-np.inf)
         indices = xp.asarray(indices, xp.int32)
-        assert scores.shape[0] == indices.size
-        scores = F.hstack((ckey_scores, scores))
+        if offsets[-1] > 0:
+            scores = F.pad_sequence(scores, padding=-np.inf)
+            assert scores.shape[0] == indices.size
+            scores = F.hstack((ckey_scores, scores))
+        else:
+            scores = ckey_scores
         indices += 1
         coord_loss = F.softmax_cross_entropy(scores, indices)
         coord_accuracy = common.accuracy(scores, indices)
