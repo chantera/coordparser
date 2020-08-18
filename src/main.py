@@ -298,6 +298,9 @@ def check_grammar(test_file, limit=-1, grammar_type=1):
             pred_coords, _score = pred_coord_entries[0]
             true_coords = {ckey: coord for ckey, coord
                            in true_coords.items() if coord is not None}
+            for k, v in tuple(pred_coords.items()):
+                if v is None:
+                    del pred_coords[k]
             if pred_coords == true_coords:
                 n_corrects += 1
             else:
