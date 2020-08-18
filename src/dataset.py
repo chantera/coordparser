@@ -30,6 +30,7 @@ class DataLoader(CachedTextLoader):
         super().__init__(reader=None)
         self.init_reader(format)
         self.filter_coord = filter_coord
+        self._mode = None
         self._updated = False
         self._postag_file = None
         self._cont_embed_file = None
@@ -81,6 +82,11 @@ class DataLoader(CachedTextLoader):
             = _map(self, words, postags, cont_embeds, coords, swap_quote=True)
         self._updated = self.train
 
+        if self._mode == 'parse':
+            idx = self._context['item_index']
+            return word_ids, postag_ids, char_ids, \
+                cc_indices, sep_indices, cont_embeds, words, indices, idx
+
         for cc in cc_indices:
             if cc not in coords:
                 coords[cc] = None
@@ -124,21 +130,31 @@ class DataLoader(CachedTextLoader):
         return passed
 
     def load(self, file, train=False, size=None, bucketing=False,
-             refresh_cache=False):
+             refresh_cache=False, mode=None):
+        self._mode = mode
         self._updated = False
+
+        disable_cache = False
+        if self._mode == 'parse':
+            if train:
+                raise ValueError('`train` must be disabled for parsing')
+            disable_cache = True
         files = [file, self._postag_file, self._cont_embed_file]
-        dataset = super().load(
-            files, train, size, bucketing,
-            extra_ids=files[1:], refresh_cache=refresh_cache)
+        extra_ids = files[1:] + [self._mode]
+        dataset = super().load(files, train, size, bucketing, extra_ids,
+                               refresh_cache, disable_cache)
         if self._updated and self._cache_io is not None:
             self.update_cache()
+
         self._postag_file = self._cont_embed_file = None
+        self._mode = None
         self._updated = False
         return dataset
 
     def load_with_external_resources(
             self, file, train=False, size=None, bucketing=False,
             refresh_cache=False,
+            mode=None,
             use_external_postags=False,
             use_contextualized_embed=False,
             postag_file_ext='.tag.ssv',
@@ -157,7 +173,7 @@ class DataLoader(CachedTextLoader):
                 logger.info('load contextualized embeddings from {}'
                             .format(cont_embed_file))
             self.set_contextualized_embed_file(cont_embed_file)
-        return self.load(file, train, size, bucketing, refresh_cache)
+        return self.load(file, train, size, bucketing, refresh_cache, mode)
 
     def set_postag_file(self, file):
         self._postag_file = file
@@ -167,9 +183,6 @@ class DataLoader(CachedTextLoader):
 
     def use_pretrained_embed(self):
         return self._use_pretrained_embed
-
-    def load_from_tagged_file(self, file, contextualized_embed_file=None):
-        raise NotImplementedError
 
 
 def _convert_item_to_attrs(item, reader_type):

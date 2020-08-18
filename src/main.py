@@ -227,8 +227,11 @@ def parse(model_file, target_file, contextualized_embed_file=None,
             "contextualized_embed_file must not be specified when using "
             "a model trained without contextualized embeddings")
 
-    target_dataset = loader.load_from_tagged_file(
-        target_file, contextualized_embed_file)
+    if target_file.endswith('.txt'):
+        loader.init_reader(format='default')
+    loader.set_contextualized_embed_file(contextualized_embed_file)
+    target_dataset = loader.load_with_external_resources(
+        target_file, mode='parse', use_external_postags=True, logger=logger)
     logger.info('{} samples loaded for parsing'.format(len(target_dataset)))
 
     model = context.builder.build()
@@ -243,10 +246,10 @@ def parse(model_file, target_file, contextualized_embed_file=None,
     pbar = tqdm(total=len(target_dataset))
     for batch in target_dataset.batch(
             context.batch_size, colwise=True, shuffle=False):
-        xs, (words, is_quote, sentence_id) = batch[:-3], batch[-3:]
+        xs, (words, indices, sentence_id) = batch[:-3], batch[-3:]
         parsed = parser.parse(*xs, n_best)
-        for results, words_i, is_quote_i, sentence_id_i \
-                in zip(parsed, words, is_quote, sentence_id):
+        for results, words_i, indices_i, sentence_id_i \
+                in zip(parsed, words, indices, sentence_id):
             raw_sentence = ' '.join(words_i)
             for best_k, (coords, score) in enumerate(results):
                 output = [
@@ -255,7 +258,8 @@ def parse(model_file, target_file, contextualized_embed_file=None,
                     "CANDIDATE: #{}".format(best_k),
                     "SCORE: {}".format(score),
                 ]
-                coords = dataset.post_process(coords, is_quote_i)
+                if indices_i is not None:
+                    coords = dataset.postprocess(coords, indices_i)
                 for cc, coord in sorted(coords.items()):
                     output.append("CC: {} {}".format(cc, words_i[cc]))
                     if coord is not None:
@@ -398,9 +402,6 @@ if __name__ == "__main__":
             help='Test data file'),
     })
     App.add_command('parse', parse, {
-        'n_best':
-        arg('--nbest', type=int, default=1, metavar='NUM',
-            help='Number of candidates to output'),
         'contextualized_embed_file':
         arg('--cembfile', type=str, metavar='FILE',
             help='Contextualized embeddings file'),
@@ -410,6 +411,9 @@ if __name__ == "__main__":
         'model_file':
         arg('--modelfile', type=str, required=True, metavar='FILE',
             help='Trained model file'),
+        'n_best':
+        arg('--nbest', type=int, default=1, metavar='NUM',
+            help='Number of candidates to output'),
         'target_file':
         arg('--input', type=str, required=True, metavar='FILE',
             help='Input text file to parse'),
