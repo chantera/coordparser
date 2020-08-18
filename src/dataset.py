@@ -25,23 +25,13 @@ class DataLoader(CachedTextLoader):
                  word_unknown="<UNK>",
                  filter_coord=False,
                  format='tree'):
-        if format == 'tree':
-            read_genia = False
-        elif format == 'genia':
-            read_genia = True
-        else:
-            raise ValueError("Invalid data format: {}".format(format))
-        super().__init__(reader=reader.ZipReader([
-            GeniaReader() if read_genia else reader.TreeReader(),
-            reader.CsvReader(delimiter=' '),
-            reader.ContextualizedEmbeddingsReader(),
-        ]))
+        super().__init__(reader=None)
+        self.init_reader(format)
         self.filter_coord = filter_coord
         self._updated = False
         self._postag_file = None
         self._cont_embed_file = None
         self._use_pretrained_embed = word_embed_file is not None
-        self._read_genia = read_genia
 
         word_vocab = text.EmbeddingVocab(
             file=word_embed_file,
@@ -64,22 +54,34 @@ class DataLoader(CachedTextLoader):
         self.add_processor('pos', postag_vocab, preprocess=False)
         self.add_processor('char', char_vocab, preprocess=False)
 
-    def map(self, item):
-        if self._read_genia:
-            ((sentence, coords), ext_postags, cont_embeds) = item
-            words, postags = \
-                zip(*[(token['word'], token['postag']) for token in sentence])
+    def init_reader(self, format='default'):
+        if format == 'tree':
+            primary_reader = reader.TreeReader()
+        elif format == 'genia':
+            primary_reader = GeniaReader()
         else:
-            (tree, ext_postags, cont_embeds) = item
-            words, postags, _spans, coords = _extract(tree)
+            primary_reader = reader.CsvReader(delimiter=' ')
+        self._reader = reader.ZipReader([
+            primary_reader,
+            reader.CsvReader(delimiter=' '),
+            reader.ContextualizedEmbeddingsReader(),
+        ])
 
-        cc_indices = np.array([i for i, word in enumerate(words)
-                               if word.lower() in CC_KEY], dtype=np.int32)
+    @property
+    def _primary_reader(self):
+        return self._reader._readers[0]
+
+    def map(self, item):
+        words, postags, cont_embeds, coords \
+            = _convert_item_to_attrs(item, type(self._primary_reader))
+        (word_ids, postag_ids, char_ids,
+         cc_indices, sep_indices, cont_embeds, coords) \
+            = _map(self, words, postags, cont_embeds, coords)
+        self._updated = self.train
+
         for cc in cc_indices:
             if cc not in coords:
                 coords[cc] = None
-        sep_indices = np.array([i for i, word in enumerate(words)
-                                if word in CC_SEP], dtype=np.int32)
         # Check each separator belongs to only one coordination
         for sep in sep_indices:
             found_coord = False
@@ -90,18 +92,6 @@ class DataLoader(CachedTextLoader):
                     assert not found_coord
                     found_coord = True
 
-        word_ids = self.map_attr(
-            'word', words, self.train and not self._use_pretrained_embed)
-        char_ids = [self.map_attr(
-            'char', list(word), self.train) for word in words]
-        if ext_postags is not None:
-            assert len(words) == len(ext_postags)
-            postags = ext_postags
-        postag_ids = self.map_attr('pos', postags, self.train)
-        if cont_embeds is not None:
-            assert cont_embeds.shape[1] == len(words)
-
-        self._updated = self.train
         return word_ids, postag_ids, char_ids, \
             cc_indices, sep_indices, cont_embeds, coords
 
@@ -109,42 +99,26 @@ class DataLoader(CachedTextLoader):
         if self.filter_coord is False:
             return True
 
-        passed = False
         if self.filter_coord is True or self.filter_coord == "any":
-            if self._read_genia:
-                sentence = item[0][0]
-                passed = any(t['word'].lower() in CC_KEY for t in sentence)
-            else:
+            if isinstance(self._primary_reader, reader.TreeReader):
                 def _traverse(tree):
                     if len(tree) == 2 and isinstance(tree[1], str):  # Leaf
-                        return tree[1].lower() in CC_KEY
-                    for child in tree[1:]:
-                        if _traverse(child):
-                            return True
-                    return False
+                        yield tree[1]
+                    else:  # Node
+                        for child in tree[1:]:
+                            yield from _traverse(child)
                 tree = item[0]
-                passed = _traverse(tree[0] if len(tree) == 1 else tree)
+                word_iter = _traverse(tree[0] if len(tree) == 1 else tree)
+            elif isinstance(self._primary_reader, GeniaReader):
+                word_iter = (t['word'] for t in item[0][0])
+            else:
+                word_iter = (t.split('_')[0] for t in item[0])
+            passed = _filter(word_iter, None, target='any')
         else:
-            if self._read_genia:
-                coords = item[0][1]
-            else:
-                coords = _extract(item[0])[-1]
-            n_conjuncts = [len(coord.conjuncts)
-                           for coord in coords.values() if coord is not None]
-            if len(n_conjuncts) == 0:
-                passed = False
-            elif self.filter_coord == "simple":
-                passed = len(n_conjuncts) == 1 and n_conjuncts[0] == 2
-            elif self.filter_coord == "not_simple":
-                passed = (len(n_conjuncts) >= 2
-                          or any(n > 2 for n in n_conjuncts))
-            elif self.filter_coord == "consecutive":
-                passed = any(n > 2 for n in n_conjuncts)
-            elif self.filter_coord == "multiple":
-                passed = len(n_conjuncts) >= 2
-            else:
-                raise ValueError("Invalid filter type: {}"
-                                 .format(self.filter_coord))
+            coords = _convert_item_to_attrs(
+                item, type(self._primary_reader))[-1]
+            passed = _filter(None, coords, target=self.filter_coord)
+
         return passed
 
     def load(self, file, train=False, size=None, bucketing=False,
@@ -169,20 +143,18 @@ class DataLoader(CachedTextLoader):
             contextualized_embed_file_ext='.hdf5',
             logger=None,
     ):
-        postag_file = None
         if use_external_postags:
             postag_file = _find_file(file, postag_file_ext)
             if postag_file is not None and logger is not None:
                 logger.info('load postags from {}'.format(postag_file))
-        self.set_postag_file(postag_file)
-        cont_embed_file = None
+            self.set_postag_file(postag_file)
         if use_contextualized_embed:
             cont_embed_file = _find_file(
                 file, contextualized_embed_file_ext)
             if cont_embed_file is not None and logger is not None:
                 logger.info('load contextualized embeddings from {}'
                             .format(cont_embed_file))
-        self.set_contextualized_embed_file(cont_embed_file)
+            self.set_contextualized_embed_file(cont_embed_file)
         return self.load(file, train, size, bucketing, refresh_cache)
 
     def set_postag_file(self, file):
@@ -232,6 +204,65 @@ class DataLoader(CachedTextLoader):
                       cont_embeds, raw_words, is_quote, idx)
             samples.append(sample)
         return Dataset(samples)
+
+
+def _convert_item_to_attrs(item, reader_type):
+    if issubclass(reader_type, reader.TreeReader):
+        (tree, ext_postags, cont_embeds) = item
+        words, postags, _spans, coords = _extract(tree)
+    elif issubclass(reader_type, GeniaReader):
+        ((sentence, coords), ext_postags, cont_embeds) = item
+        words, postags = \
+            zip(*[(token['word'], token['postag']) for token in sentence])
+    else:
+        sentence, ext_postags, cont_embeds = item
+        words, postags = zip(*[token.split('_') for token in sentence])
+        coords = {}
+
+    if ext_postags is not None:
+        assert len(words) == len(ext_postags)
+        postags = ext_postags
+
+    return words, postags, cont_embeds, coords
+
+
+def _map(loader, words, postags, cont_embeds, coords=None):
+    cc_indices = [i for i, word in enumerate(words) if word.lower() in CC_KEY]
+    sep_indices = [i for i, word in enumerate(words) if word in CC_SEP]
+    word_ids = loader.map_attr(
+        'word', words, loader.train and not loader._use_pretrained_embed)
+    char_ids = [loader.map_attr(
+        'char', list(word), loader.train) for word in words]
+    postag_ids = loader.map_attr('pos', postags, loader.train)
+    cc_indices = np.array(cc_indices, np.int32)
+    sep_indices = np.array(sep_indices, np.int32)
+    if cont_embeds is not None:
+        assert cont_embeds.shape[1] == len(words)
+
+    return word_ids, postag_ids, char_ids, \
+        cc_indices, sep_indices, cont_embeds, coords
+
+
+def _filter(words, coords, target='any'):
+    if target == 'any':
+        return any(w.lower() in CC_KEY for w in words)
+
+    n_conjuncts = [len(coord.conjuncts)
+                   for coord in coords.values() if coord is not None]
+    if len(n_conjuncts) == 0:
+        passed = False
+    elif target == 'simple':
+        passed = len(n_conjuncts) == 1 and n_conjuncts[0] == 2
+    elif target == 'not_simple':
+        passed = (len(n_conjuncts) >= 2
+                  or any(n > 2 for n in n_conjuncts))
+    elif target == 'consecutive':
+        passed = any(n > 2 for n in n_conjuncts)
+    elif target == 'multiple':
+        passed = len(n_conjuncts) >= 2
+    else:
+        raise ValueError("Invalid filter type: {}".format(target))
+    return passed
 
 
 def _find_file(path, ext):

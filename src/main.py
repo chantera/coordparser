@@ -44,27 +44,25 @@ def train(
     if model_config is None:
         model_config = {}
 
-    read_genia = format == 'genia'
     loader = dataset.DataLoader.build(
         word_embed_size=model_config.get('word_embed_size', 100),
         postag_embed_size=model_config.get('postag_embed_size', 50),
         char_embed_size=model_config.get('char_embed_size', 10),
         word_embed_file=embed_file,
-        filter_coord=(not read_genia),
+        filter_coord=(format == 'tree'),
         enable_cache=not(disable_cache),
         refresh_cache=refresh_cache,
         format=format,
         cache_options=dict(dir=cache_dir, mkdir=True, logger=logger),
         extra_ids=(git.hash(),))
 
-    use_external_postags = not read_genia
     cont_embed_file_ext = _get_cont_embed_file_ext(encoder_input)
     use_cont_embed = cont_embed_file_ext is not None
 
     train_dataset = loader.load_with_external_resources(
         train_file, train=True, bucketing=False,
         size=None if limit < 0 else limit, refresh_cache=refresh_cache,
-        use_external_postags=use_external_postags,
+        use_external_postags=True,
         use_contextualized_embed=use_cont_embed,
         contextualized_embed_file_ext=cont_embed_file_ext,
         logger=logger)
@@ -75,7 +73,7 @@ def train(
             test_file, train=False, bucketing=False,
             size=None if limit < 0 else limit // 10,
             refresh_cache=refresh_cache,
-            use_external_postags=use_external_postags,
+            use_external_postags=True,
             use_contextualized_embed=use_cont_embed,
             contextualized_embed_file_ext=cont_embed_file_ext,
             logger=logger)
@@ -145,15 +143,13 @@ def test(model_file, test_file, filter_type=True, limit=-1, device=-1):
     loader.filter_coord = filter_type
     encoder_input = context.encoder_input
 
-    read_genia = loader._read_genia
-    use_external_postags = not read_genia
     cont_embed_file_ext = _get_cont_embed_file_ext(encoder_input)
     use_cont_embed = cont_embed_file_ext is not None
 
     test_dataset = loader.load_with_external_resources(
         test_file, train=False, bucketing=False,
         size=None if limit < 0 else limit,
-        use_external_postags=use_external_postags,
+        use_external_postags=True,
         use_contextualized_embed=use_cont_embed,
         contextualized_embed_file_ext=cont_embed_file_ext,
         logger=logger)
