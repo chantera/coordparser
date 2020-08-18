@@ -101,9 +101,9 @@ class EncoderBuilder(object):
 class CoordSolverBuilder(EncoderBuilder):
 
     def __init__(self, loader, **kwargs):
+        super().__init__(loader, **kwargs)
         default_feature2 = 'extractor1' if kwargs.get('arch', 'Teranishi19') \
             in ('Teranishi19', 'teranishi19') else 'extractor2'
-        super().__init__(loader, **kwargs)
         self.config.update(
             arch='Teranishi19',
             division='inner_outer',

@@ -3,7 +3,6 @@ import os
 import warnings
 
 import numpy as np
-from teras.dataset.dataset import Dataset
 from teras.dataset.loader import CachedTextLoader
 from teras.io import reader
 from teras.preprocessing import text
