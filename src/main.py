@@ -35,6 +35,7 @@ def train(
         save_dir=None,
         seed=None,
         cache_dir='',
+        disable_cache=False,
         refresh_cache=False):
     if seed is not None:
         utils.set_random_seed(seed, device)
@@ -50,6 +51,7 @@ def train(
         char_embed_size=model_config.get('char_embed_size', 10),
         word_embed_file=embed_file,
         filter_coord=(not read_genia),
+        enable_cache=not(disable_cache),
         refresh_cache=refresh_cache,
         format=format,
         cache_options=dict(dir=cache_dir, mkdir=True, logger=logger),
@@ -323,6 +325,8 @@ if __name__ == "__main__":
         'cache_dir':
         arg('--cachedir', type=str, default=(App.basedir + '/../cache'),
             metavar='DIR', help='Cache directory'),
+        'disable_cache':
+        arg('--nocache', action='store_true', help='Disable cache'),
         'test_file':
         arg('--devfile', type=str, default=None, metavar='FILE',
             help='Development data file'),
