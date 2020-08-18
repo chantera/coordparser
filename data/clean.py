@@ -3,8 +3,8 @@ import argparse
 from teras.io.reader import read_tree
 
 
-CC_SEP = [",", ";", ":", "--", "..."]
-EXCLUDING_SPAN_LABEL = ["-NONE-", "``", "''"]
+CC_SEP = (",", ";", ":", "--", "...")
+EXCLUDING_SPAN_LABEL = ("-NONE-")
 
 
 def clean_tree(tree, exclusion=None):
