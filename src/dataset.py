@@ -387,7 +387,9 @@ def _extract(tree):
 
     def _traverse(tree, index):
         begin = index
-        label = tree[0].split("-")[0]
+        label = tree[0]
+        if not label.startswith("-"):
+            label = label.split("-")[0]
         if len(tree) == 2 and isinstance(tree[1], str):  # Leaf
             words.append(tree[1])
             postags.append(label)
