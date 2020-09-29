@@ -35,6 +35,7 @@ def train(
         save_dir=None,
         seed=None,
         cache_dir='',
+        disable_cache=False,
         refresh_cache=False):
     if seed is not None:
         utils.set_random_seed(seed, device)
@@ -43,40 +44,41 @@ def train(
     if model_config is None:
         model_config = {}
 
-    read_genia = format == 'genia'
     loader = dataset.DataLoader.build(
         word_embed_size=model_config.get('word_embed_size', 100),
         postag_embed_size=model_config.get('postag_embed_size', 50),
         char_embed_size=model_config.get('char_embed_size', 10),
         word_embed_file=embed_file,
-        filter_coord=(not read_genia),
+        filter_coord=(format == 'tree'),
+        enable_cache=not(disable_cache),
         refresh_cache=refresh_cache,
         format=format,
         cache_options=dict(dir=cache_dir, mkdir=True, logger=logger),
         extra_ids=(git.hash(),))
 
-    use_external_postags = not read_genia
     cont_embed_file_ext = _get_cont_embed_file_ext(encoder_input)
     use_cont_embed = cont_embed_file_ext is not None
 
     train_dataset = loader.load_with_external_resources(
         train_file, train=True, bucketing=False,
         size=None if limit < 0 else limit, refresh_cache=refresh_cache,
-        use_external_postags=use_external_postags,
+        use_external_postags=True,
         use_contextualized_embed=use_cont_embed,
-        contextualized_embed_file_ext=cont_embed_file_ext)
-    logging.info('{} samples loaded for training'.format(len(train_dataset)))
+        contextualized_embed_file_ext=cont_embed_file_ext,
+        logger=logger)
+    logger.info('{} samples loaded for training'.format(len(train_dataset)))
     test_dataset = None
     if test_file is not None:
         test_dataset = loader.load_with_external_resources(
             test_file, train=False, bucketing=False,
             size=None if limit < 0 else limit // 10,
             refresh_cache=refresh_cache,
-            use_external_postags=use_external_postags,
+            use_external_postags=True,
             use_contextualized_embed=use_cont_embed,
-            contextualized_embed_file_ext=cont_embed_file_ext)
-        logging.info('{} samples loaded for validation'
-                     .format(len(test_dataset)))
+            contextualized_embed_file_ext=cont_embed_file_ext,
+            logger=logger)
+        logger.info('{} samples loaded for validation'
+                    .format(len(test_dataset)))
 
     builder = models.CoordSolverBuilder(
         loader, inputs=encoder_input, **model_config)
@@ -114,12 +116,12 @@ def train(
     if test_dataset:
         parser = parsers.build_parser(loader, model)
         evaluator = eval_module.Evaluator(
-            parser, logger=logging, report_details=False)
+            parser, logger=logger, report_details=False)
         trainer.add_listener(evaluator)
 
     if save_dir is not None:
-        accessid = logging.getLogger().accessid
-        date = logging.getLogger().accesstime.strftime('%Y%m%d')
+        accessid = logger.accessid
+        date = logger.accesstime.strftime('%Y%m%d')
         metric = 'whole' if isinstance(model, models.Teranishi17) else 'inner'
         trainer.add_listener(utils.Saver(
             model, basename="{}-{}".format(date, accessid),
@@ -132,7 +134,8 @@ def train(
 
 def test(model_file, test_file, filter_type=True, limit=-1, device=-1):
     context = utils.Saver.load_context(model_file)
-    logging.trace('# context: {}'.format(context))
+    logger = logging.getLogger()
+    logger.trace('# context: {}'.format(context))
     if context.seed is not None:
         utils.set_random_seed(context.seed, device)
 
@@ -140,18 +143,17 @@ def test(model_file, test_file, filter_type=True, limit=-1, device=-1):
     loader.filter_coord = filter_type
     encoder_input = context.encoder_input
 
-    read_genia = loader._read_genia
-    use_external_postags = not read_genia
     cont_embed_file_ext = _get_cont_embed_file_ext(encoder_input)
     use_cont_embed = cont_embed_file_ext is not None
 
     test_dataset = loader.load_with_external_resources(
         test_file, train=False, bucketing=False,
         size=None if limit < 0 else limit,
-        use_external_postags=use_external_postags,
+        use_external_postags=True,
         use_contextualized_embed=use_cont_embed,
-        contextualized_embed_file_ext=cont_embed_file_ext)
-    logging.info('{} samples loaded for test'.format(len(test_dataset)))
+        contextualized_embed_file_ext=cont_embed_file_ext,
+        logger=logger)
+    logger.info('{} samples loaded for test'.format(len(test_dataset)))
 
     model = context.builder.build()
     chainer.serializers.load_npz(model_file, model)
@@ -161,10 +163,10 @@ def test(model_file, test_file, filter_type=True, limit=-1, device=-1):
 
     parser = parsers.build_parser(loader, model)
     evaluator = eval_module.Evaluator(
-        parser, logger=logging, report_details=True)
-    reporter = training.listeners.Reporter(logging.getLogger())
+        parser, logger=logger, report_details=True)
+    reporter = training.listeners.Reporter(logger)
 
-    logging.info('Start decoding')
+    logger.info('Start decoding')
     utils.chainer_train_off()
     evaluator.on_epoch_validate_begin({'epoch': -1})
     pbar = tqdm(total=len(test_dataset))
@@ -208,7 +210,8 @@ def _get_cont_embed_file_ext(encoder_input):
 def parse(model_file, target_file, contextualized_embed_file=None,
           n_best=1, device=-1):
     context = utils.Saver.load_context(model_file)
-    logging.trace('# context: {}'.format(context))
+    logger = logging.getLogger()
+    logger.trace('# context: {}'.format(context))
     if context.seed is not None:
         utils.set_random_seed(context.seed, device)
 
@@ -224,9 +227,12 @@ def parse(model_file, target_file, contextualized_embed_file=None,
             "contextualized_embed_file must not be specified when using "
             "a model trained without contextualized embeddings")
 
-    target_dataset = loader.load_from_tagged_file(
-        target_file, contextualized_embed_file)
-    logging.info('{} samples loaded for parsing'.format(len(target_dataset)))
+    if target_file.endswith('.txt'):
+        loader.init_reader(format='default')
+    loader.set_contextualized_embed_file(contextualized_embed_file)
+    target_dataset = loader.load_with_external_resources(
+        target_file, mode='parse', use_external_postags=True, logger=logger)
+    logger.info('{} samples loaded for parsing'.format(len(target_dataset)))
 
     model = context.builder.build()
     chainer.serializers.load_npz(model_file, model)
@@ -235,15 +241,15 @@ def parse(model_file, target_file, contextualized_embed_file=None,
         model.to_gpu(device)
     parser = parsers.build_parser(loader, model)
 
-    logging.info('Start parsing')
+    logger.info('Start parsing')
     utils.chainer_train_off()
     pbar = tqdm(total=len(target_dataset))
     for batch in target_dataset.batch(
             context.batch_size, colwise=True, shuffle=False):
-        xs, (words, is_quote, sentence_id) = batch[:-3], batch[-3:]
+        xs, (words, indices, sentence_id) = batch[:-3], batch[-3:]
         parsed = parser.parse(*xs, n_best)
-        for results, words_i, is_quote_i, sentence_id_i \
-                in zip(parsed, words, is_quote, sentence_id):
+        for results, words_i, indices_i, sentence_id_i \
+                in zip(parsed, words, indices, sentence_id):
             raw_sentence = ' '.join(words_i)
             for best_k, (coords, score) in enumerate(results):
                 output = [
@@ -252,7 +258,8 @@ def parse(model_file, target_file, contextualized_embed_file=None,
                     "CANDIDATE: #{}".format(best_k),
                     "SCORE: {}".format(score),
                 ]
-                coords = dataset.post_process(coords, is_quote_i)
+                if indices_i is not None:
+                    coords = dataset.postprocess(coords, indices_i)
                 for cc, coord in sorted(coords.items()):
                     output.append("CC: {} {}".format(cc, words_i[cc]))
                     if coord is not None:
@@ -270,6 +277,7 @@ def parse(model_file, target_file, contextualized_embed_file=None,
 
 
 def check_grammar(test_file, limit=-1, grammar_type=1):
+    logger = logging.getLogger()
     loader = dataset.DataLoader(filter_coord=True)
     test_dataset = loader.load(test_file, train=True, bucketing=False,
                                size=None if limit < 0 else limit)
@@ -285,7 +293,7 @@ def check_grammar(test_file, limit=-1, grammar_type=1):
     grammar = parsers.Grammar(word_vocab, cfg)
     parser = parsers.CkyParser(model, grammar)
     evaluator = eval_module.Evaluator(
-        parser, logger=logging, report_details=False)
+        parser, logger=logger, report_details=False)
     n_corrects = 0
     pbar = tqdm(total=len(test_dataset))
     for batch in test_dataset.batch(size=20, colwise=True, shuffle=False):
@@ -312,8 +320,8 @@ def check_grammar(test_file, limit=-1, grammar_type=1):
         pbar.update(len(ts))
     pbar.close()
     evaluator.report()
-    logging.info("Number of correct tree: {}/{}"
-                 .format(n_corrects, len(test_dataset)))
+    logger.info("Number of correct tree: {}/{}"
+                .format(n_corrects, len(test_dataset)))
 
 
 if __name__ == "__main__":
@@ -326,6 +334,8 @@ if __name__ == "__main__":
         'cache_dir':
         arg('--cachedir', type=str, default=(App.basedir + '/../cache'),
             metavar='DIR', help='Cache directory'),
+        'disable_cache':
+        arg('--nocache', action='store_true', help='Disable cache'),
         'test_file':
         arg('--devfile', type=str, default=None, metavar='FILE',
             help='Development data file'),
@@ -392,9 +402,6 @@ if __name__ == "__main__":
             help='Test data file'),
     })
     App.add_command('parse', parse, {
-        'n_best':
-        arg('--nbest', type=int, default=1, metavar='NUM',
-            help='Number of candidates to output'),
         'contextualized_embed_file':
         arg('--cembfile', type=str, metavar='FILE',
             help='Contextualized embeddings file'),
@@ -404,6 +411,9 @@ if __name__ == "__main__":
         'model_file':
         arg('--modelfile', type=str, required=True, metavar='FILE',
             help='Trained model file'),
+        'n_best':
+        arg('--nbest', type=int, default=1, metavar='NUM',
+            help='Number of candidates to output'),
         'target_file':
         arg('--input', type=str, required=True, metavar='FILE',
             help='Input text file to parse'),

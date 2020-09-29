@@ -14,7 +14,6 @@ def extract_words(tree):
     buf = []
     _traverse(tree, buf)
     return buf
-    return ''.join(buf)
 
 
 if __name__ == "__main__":

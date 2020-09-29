@@ -3,7 +3,6 @@ import os
 import warnings
 
 import numpy as np
-from teras.dataset.dataset import Dataset
 from teras.dataset.loader import CachedTextLoader
 from teras.io import reader
 from teras.preprocessing import text
@@ -12,6 +11,8 @@ from teras.preprocessing import text
 _CHAR_PAD = "<PAD>"
 CC_KEY = ["and", "or", "but", "nor", "and/or"]
 CC_SEP = [",", ";", ":"]
+OPEN_QUOTE = ("``", "`")
+CLOSE_QUOTE = ("''", "'")
 
 
 class DataLoader(CachedTextLoader):
@@ -25,23 +26,14 @@ class DataLoader(CachedTextLoader):
                  word_unknown="<UNK>",
                  filter_coord=False,
                  format='tree'):
-        if format == 'tree':
-            read_genia = False
-        elif format == 'genia':
-            read_genia = True
-        else:
-            raise ValueError("Invalid data format: {}".format(format))
-        super().__init__(reader=reader.ZipReader([
-            GeniaReader() if read_genia else reader.TreeReader(),
-            reader.CsvReader(delimiter=' '),
-            reader.ContextualizedEmbeddingsReader(),
-        ]))
+        super().__init__(reader=None)
+        self.init_reader(format)
         self.filter_coord = filter_coord
+        self._mode = None
         self._updated = False
         self._postag_file = None
         self._cont_embed_file = None
         self._use_pretrained_embed = word_embed_file is not None
-        self._read_genia = read_genia
 
         word_vocab = text.EmbeddingVocab(
             file=word_embed_file,
@@ -64,22 +56,39 @@ class DataLoader(CachedTextLoader):
         self.add_processor('pos', postag_vocab, preprocess=False)
         self.add_processor('char', char_vocab, preprocess=False)
 
-    def map(self, item):
-        if self._read_genia:
-            ((sentence, coords), ext_postags, cont_embeds) = item
-            words, postags = \
-                zip(*[(token['word'], token['postag']) for token in sentence])
+    def init_reader(self, format='default'):
+        if format == 'tree':
+            primary_reader = reader.TreeReader()
+        elif format == 'genia':
+            primary_reader = GeniaReader()
         else:
-            (tree, ext_postags, cont_embeds) = item
-            words, postags, _spans, coords = _extract(tree)
+            primary_reader = reader.CsvReader(delimiter=' ')
+        self._reader = reader.ZipReader([
+            primary_reader,
+            reader.CsvReader(delimiter=' '),
+            reader.ContextualizedEmbeddingsReader(),
+        ])
 
-        cc_indices = np.array([i for i, word in enumerate(words)
-                               if word.lower() in CC_KEY], dtype=np.int32)
+    @property
+    def _primary_reader(self):
+        return self._reader._readers[0]
+
+    def map(self, item):
+        words, postags, cont_embeds, coords \
+            = _convert_item_to_attrs(item, type(self._primary_reader))
+        (word_ids, postag_ids, char_ids,
+         cc_indices, sep_indices, cont_embeds, indices, coords) \
+            = _map(self, words, postags, cont_embeds, coords, swap_quote=True)
+        self._updated = self.train
+
+        if self._mode == 'parse':
+            idx = self._context['item_index']
+            return word_ids, postag_ids, char_ids, \
+                cc_indices, sep_indices, cont_embeds, words, indices, idx
+
         for cc in cc_indices:
             if cc not in coords:
                 coords[cc] = None
-        sep_indices = np.array([i for i, word in enumerate(words)
-                                if word in CC_SEP], dtype=np.int32)
         # Check each separator belongs to only one coordination
         for sep in sep_indices:
             found_coord = False
@@ -90,18 +99,6 @@ class DataLoader(CachedTextLoader):
                     assert not found_coord
                     found_coord = True
 
-        word_ids = self.map_attr(
-            'word', words, self.train and not self._use_pretrained_embed)
-        char_ids = [self.map_attr(
-            'char', list(word), self.train) for word in words]
-        if ext_postags is not None:
-            assert len(words) == len(ext_postags)
-            postags = ext_postags
-        postag_ids = self.map_attr('pos', postags, self.train)
-        if cont_embeds is not None:
-            assert cont_embeds.shape[1] == len(words)
-
-        self._updated = self.train
         return word_ids, postag_ids, char_ids, \
             cc_indices, sep_indices, cont_embeds, coords
 
@@ -109,81 +106,73 @@ class DataLoader(CachedTextLoader):
         if self.filter_coord is False:
             return True
 
-        passed = False
         if self.filter_coord is True or self.filter_coord == "any":
-            if self._read_genia:
-                sentence = item[0][0]
-                passed = any(t['word'].lower() in CC_KEY for t in sentence)
-            else:
+            if isinstance(self._primary_reader, reader.TreeReader):
                 def _traverse(tree):
                     if len(tree) == 2 and isinstance(tree[1], str):  # Leaf
-                        return tree[1].lower() in CC_KEY
-                    for child in tree[1:]:
-                        if _traverse(child):
-                            return True
-                    return False
+                        yield tree[1]
+                    else:  # Node
+                        for child in tree[1:]:
+                            yield from _traverse(child)
                 tree = item[0]
-                passed = _traverse(tree[0] if len(tree) == 1 else tree)
+                word_iter = _traverse(tree[0] if len(tree) == 1 else tree)
+            elif isinstance(self._primary_reader, GeniaReader):
+                word_iter = (t['word'] for t in item[0][0])
+            else:
+                word_iter = (t.split('_')[0] for t in item[0])
+            passed = _filter(word_iter, None, target='any')
         else:
-            if self._read_genia:
-                coords = item[0][1]
-            else:
-                coords = _extract(item[0])[-1]
-            n_conjuncts = [len(coord.conjuncts)
-                           for coord in coords.values() if coord is not None]
-            if len(n_conjuncts) == 0:
-                passed = False
-            elif self.filter_coord == "simple":
-                passed = len(n_conjuncts) == 1 and n_conjuncts[0] == 2
-            elif self.filter_coord == "not_simple":
-                passed = (len(n_conjuncts) >= 2
-                          or any(n > 2 for n in n_conjuncts))
-            elif self.filter_coord == "consecutive":
-                passed = any(n > 2 for n in n_conjuncts)
-            elif self.filter_coord == "multiple":
-                passed = len(n_conjuncts) >= 2
-            else:
-                raise ValueError("Invalid filter type: {}"
-                                 .format(self.filter_coord))
+            coords = _convert_item_to_attrs(
+                item, type(self._primary_reader))[-1]
+            passed = _filter(None, coords, target=self.filter_coord)
+
         return passed
 
     def load(self, file, train=False, size=None, bucketing=False,
-             refresh_cache=False):
+             refresh_cache=False, mode=None):
+        self._mode = mode
         self._updated = False
+
+        disable_cache = False
+        if self._mode == 'parse':
+            if train:
+                raise ValueError('`train` must be disabled for parsing')
+            disable_cache = True
         files = [file, self._postag_file, self._cont_embed_file]
-        dataset = super().load(
-            files, train, size, bucketing,
-            extra_ids=files[1:], refresh_cache=refresh_cache)
+        extra_ids = files[1:] + [self._mode]
+        dataset = super().load(files, train, size, bucketing, extra_ids,
+                               refresh_cache, disable_cache)
         if self._updated and self._cache_io is not None:
             self.update_cache()
+
         self._postag_file = self._cont_embed_file = None
+        self._mode = None
         self._updated = False
         return dataset
 
     def load_with_external_resources(
             self, file, train=False, size=None, bucketing=False,
             refresh_cache=False,
+            mode=None,
             use_external_postags=False,
             use_contextualized_embed=False,
             postag_file_ext='.tag.ssv',
             contextualized_embed_file_ext='.hdf5',
             logger=None,
     ):
-        postag_file = None
         if use_external_postags:
             postag_file = _find_file(file, postag_file_ext)
             if postag_file is not None and logger is not None:
                 logger.info('load postags from {}'.format(postag_file))
-        self.set_postag_file(postag_file)
-        cont_embed_file = None
+            self.set_postag_file(postag_file)
         if use_contextualized_embed:
             cont_embed_file = _find_file(
                 file, contextualized_embed_file_ext)
             if cont_embed_file is not None and logger is not None:
                 logger.info('load contextualized embeddings from {}'
                             .format(cont_embed_file))
-        self.set_contextualized_embed_file(cont_embed_file)
-        return self.load(file, train, size, bucketing, refresh_cache)
+            self.set_contextualized_embed_file(cont_embed_file)
+        return self.load(file, train, size, bucketing, refresh_cache, mode)
 
     def set_postag_file(self, file):
         self._postag_file = file
@@ -194,44 +183,86 @@ class DataLoader(CachedTextLoader):
     def use_pretrained_embed(self):
         return self._use_pretrained_embed
 
-    def load_from_tagged_file(self, file, contextualized_embed_file=None):
-        QUOTE = ("``", "''", "`", "'")
-        file_reader = reader.ZipReader([
-            reader.CsvReader(file, delimiter=' '),
-            reader.ContextualizedEmbeddingsReader(contextualized_embed_file),
-        ])
-        samples = []
-        for idx, (sentence, cont_embeds) in enumerate(file_reader):
-            words, postags = zip(*[token.split('_') for token in sentence])
-            raw_words = words
-            is_quote = np.array([word in QUOTE for word in words])
-            # assert not any(is_quote)
-            words = [word for word, quote in zip(words, is_quote) if not quote]
-            postags = [postag for postag, quote
-                       in zip(postags, is_quote) if not quote]
 
-            cc_indices = np.array([i for i, word in enumerate(words)
-                                   if word.lower() in CC_KEY], dtype=np.int32)
-            if len(cc_indices) == 0:
-                continue
-            sep_indices = np.array([i for i, word in enumerate(words)
-                                    if word in CC_SEP], dtype=np.int32)
-            word_ids = self.map_attr('word', words, False)
-            char_ids = [self.map_attr('char', list(word), False)
-                        for word in words]
-            postag_ids = self.map_attr('pos', postags, False)
-            if cont_embeds is not None:
-                if is_quote.sum() > 0:
-                    warnings.warn("contextualized embeddings are changed "
-                                  "to strip quotation marks: sentence=`{}`"
-                                  .format(' '.join(words)))
-                    cont_embeds = np.delete(
-                        cont_embeds, np.argwhere(is_quote), axis=1)
-                assert cont_embeds.shape[1] == len(words)
-            sample = (word_ids, postag_ids, char_ids, cc_indices, sep_indices,
-                      cont_embeds, raw_words, is_quote, idx)
-            samples.append(sample)
-        return Dataset(samples)
+def _convert_item_to_attrs(item, reader_type):
+    if issubclass(reader_type, reader.TreeReader):
+        (tree, ext_postags, cont_embeds) = item
+        words, postags, _spans, coords = _extract(tree)
+    elif issubclass(reader_type, GeniaReader):
+        ((sentence, coords), ext_postags, cont_embeds) = item
+        words, postags = \
+            zip(*[(token['word'], token['postag']) for token in sentence])
+    else:
+        sentence, ext_postags, cont_embeds = item
+        words, postags = zip(*[token.split('_') for token in sentence])
+        coords = {}
+
+    if ext_postags is not None:
+        assert len(words) == len(ext_postags)
+        postags = ext_postags
+
+    return words, postags, cont_embeds, coords
+
+
+def _map(loader, words, postags, cont_embeds, coords=None,
+         swap_quote=False):
+    indices = np.arange(len(words), dtype=np.int32)
+    swapped = False
+    if swap_quote:
+        for i, word in enumerate(words[:-1]):
+            if word in CC_SEP and words[i + 1] in CLOSE_QUOTE:
+                indices[i], indices[i + 1] = i + 1, i
+                swapped = True
+
+    if swapped:
+        words = [words[idx] for idx in indices]
+        postags = [postags[idx] for idx in indices]
+    else:
+        indices = None
+    cc_indices = [i for i, word in enumerate(words) if word.lower() in CC_KEY]
+    sep_indices = [i for i, word in enumerate(words) if word in CC_SEP]
+    word_ids = loader.map_attr(
+        'word', words, loader.train and not loader._use_pretrained_embed)
+    char_ids = [loader.map_attr(
+        'char', list(word), loader.train) for word in words]
+    postag_ids = loader.map_attr('pos', postags, loader.train)
+    cc_indices = np.array(cc_indices, np.int32)
+    sep_indices = np.array(sep_indices, np.int32)
+
+    if cont_embeds is not None:
+        if swapped:
+            # warnings.warn("contextualized embeddings are changed "
+            #               "to swap quotation marks: sentence=`{}`"
+            #               .format(' '.join(words)))
+            cont_embeds = cont_embeds[:, indices]
+        assert cont_embeds.shape[1] == len(words)
+    if swapped and coords is not None:
+        coords = preprocess(coords, indices)
+
+    return word_ids, postag_ids, char_ids, \
+        cc_indices, sep_indices, cont_embeds, indices, coords
+
+
+def _filter(words, coords, target='any'):
+    if target == 'any':
+        return any(w.lower() in CC_KEY for w in words)
+
+    n_conjuncts = [len(coord.conjuncts)
+                   for coord in coords.values() if coord is not None]
+    if len(n_conjuncts) == 0:
+        passed = False
+    elif target == 'simple':
+        passed = len(n_conjuncts) == 1 and n_conjuncts[0] == 2
+    elif target == 'not_simple':
+        passed = (len(n_conjuncts) >= 2
+                  or any(n > 2 for n in n_conjuncts))
+    elif target == 'consecutive':
+        passed = any(n > 2 for n in n_conjuncts)
+    elif target == 'multiple':
+        passed = len(n_conjuncts) >= 2
+    else:
+        raise ValueError("Invalid filter type: {}".format(target))
+    return passed
 
 
 def _find_file(path, ext):
@@ -398,7 +429,7 @@ def _extract(tree):
             cc = None
             for child in tree[1:]:
                 child_label = child[0]
-                assert child_label not in ["-NONE-", "``", "''"]
+                assert child_label != "-NONE-"
                 child_span = _traverse(child, index)
                 if "COORD" in child_label:
                     conjuncts.append(child_span)
@@ -473,7 +504,8 @@ def _find_separator(words, search_from, search_to, search_len=2):
 class Coordination(object):
     __slots__ = ('cc', 'conjuncts', 'seps', 'label')
 
-    def __init__(self, cc, conjuncts, seps=None, label=None):
+    def __init__(self, cc, conjuncts, seps=None, label=None,
+                 suppress_warning=False):
         assert isinstance(conjuncts, (list, tuple)) and len(conjuncts) >= 2
         assert all(isinstance(conj, tuple) for conj in conjuncts)
         conjuncts = sorted(conjuncts, key=lambda span: span[0])
@@ -484,7 +516,7 @@ class Coordination(object):
             if len(seps) == len(conjuncts) - 2:
                 for i, sep in enumerate(seps):
                     assert conjuncts[i][1] < sep and conjuncts[i + 1][0] > sep
-            else:
+            elif not suppress_warning:
                 warnings.warn(
                     "Coordination does not contain enough separators. "
                     "It may be a wrong coordination: "
@@ -522,15 +554,72 @@ class Coordination(object):
                     in zip(self.conjuncts, other.conjuncts))
 
 
-def post_process(coords, is_quote):
+def preprocess(coords, indices):
     new_coords = {}
-    offsets = np.delete(is_quote.cumsum(), np.argwhere(is_quote))
     for cc, coord in coords.items():
-        cc = cc + offsets[cc]
+        cc = indices[cc]
         if coord is not None:
-            conjuncts = [(b + offsets[b], e + offsets[e])
-                         for (b, e) in coord.conjuncts]
-            seps = [s + offsets[s] for s in coord.seps]
+            seps = [indices[s] for s in coord.seps]
+            conjuncts = []
+            n = len(coord.conjuncts)
+            for i, (b, e) in enumerate(coord.conjuncts):
+                if indices[b] == b - 1 and indices[b - 1] == b:
+                    # Special case for annotation error
+                    new_b = b + 1
+                else:
+                    new_b = indices[b]
+                if indices[e] == e - 1 and indices[e - 1] == e:
+                    # Case: ``A,'' ``B,'' and ``C,'' ; (0, 3), (4, 7), (9, 12)
+                    #    => ``A'', ``B'', and ``C'', ; (0, 2), (4, 6), (9, 11)
+                    new_e = indices[e]
+                    sep = e
+                    if i < n - 2 and sep + 1 != cc and sep not in seps:
+                        seps.append(sep)
+                elif indices[e] == e + 1 and indices[e + 1] == e:
+                    # Case: ``A,'' ``B,'' and ``C,'' ; (1, 2), (5, 6), (10, 11)
+                    #    => ``A'', ``B'', and ``C'', ; (1, 1), (5, 5), (10, 10)
+                    new_e = e - 1
+                    sep = e + 1
+                    if i < n - 2 and sep + 1 != cc and sep not in seps:
+                        seps.append(sep)
+                else:
+                    new_e = indices[e]
+                conjuncts.append((new_b, new_e))
             coord = Coordination(cc, conjuncts, seps, coord.label)
+        new_coords[cc] = coord
+    return new_coords
+
+
+def postprocess(coords, indices):
+    new_coords = {}
+    for cc, coord in coords.items():
+        cc = indices[cc]
+        if coord is not None:
+            seps = [indices[s] for s in coord.seps]
+            conjuncts = []
+            n = len(coord.conjuncts)
+            for i, (b, e) in enumerate(coord.conjuncts):
+                new_b = indices[b]
+                if indices[e] == e + 1 and indices[e + 1] == e:
+                    # Case: ``A'', ``B'', and ``C'', ; (0, 2), (4, 6), (9, 11)
+                    #    => ``A,'' ``B,'' and ``C,'' ; (0, 3), (4, 7), (9, 12)
+                    new_e = indices[e]
+                    sep = e
+                    if i < n - 1 and sep in seps:
+                        seps.remove(sep)
+                elif e < indices.size - 1 \
+                        and indices[e + 1] == e + 2 \
+                        and indices[e + 2] == e + 1:
+                    # Case: ``A'', ``B'', and ``C'', ; (1, 1), (5, 5), (10, 10)
+                    #    => ``A,'' ``B,'' and ``C,'' ; (1, 1), (5, 5), (10, 10)
+                    new_e = e  # always exclude the trailing comma
+                    sep = e + 1
+                    if i < n - 1 and sep in seps:
+                        seps.remove(sep)
+                else:
+                    new_e = indices[e]
+                conjuncts.append((new_b, new_e))
+            coord = Coordination(cc, conjuncts, seps, coord.label,
+                                 suppress_warning=True)
         new_coords[cc] = coord
     return new_coords

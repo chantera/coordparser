@@ -1,3 +1,4 @@
+from collections import defaultdict
 import functools
 
 import chainer
@@ -48,52 +49,114 @@ class FeatureExtractor1(FeatureExtractor):
 
 class FeatureExtractor2(FeatureExtractor):
 
-    def __init__(self, in_size):
+    def __init__(self, in_size, use_sim=True, use_repl=True):
         super().__init__()
         self.in_size = in_size
+        self.use_sim = use_sim
+        self.use_repl = use_repl
 
     def forward(self, hs_flatten, pairs, ckeys, lengths):
-        xp = chainer.cuda.get_array_module(hs_flatten)
-        begins, ends = xp.asarray(pairs.T)
-        ckeys, lengths = xp.asarray(ckeys), xp.asarray(lengths)
-        begins_pre = begins - 1
-        ends_post = ends + 1
-        ckeys_pre = ckeys - 1
-        ckeys_post = ckeys + 1
-        to_cpu = chainer.cuda.to_cpu
+        features = []
+        if self.use_sim:
+            features.extend(
+                self._feature_sim(hs_flatten, pairs, ckeys, lengths))
+        if self.use_repl:
+            features.extend(
+                self._feature_repl(hs_flatten, pairs, ckeys, lengths))
+        if not (self.use_sim or self.use_repl):
+            features.extend(
+                self._forward_spans(hs_flatten, pairs, ckeys, lengths))
+        fs = F.hstack(features)
+        return fs
 
-        @functools.lru_cache(maxsize=None)
-        def _get_span_v(i, j):
-            return F.average(hs_flatten[i:j + 1], axis=0)
-
-        left_spans = F.vstack([_get_span_v(begin, ckey_pre)
-                               for begin, ckey_pre
-                               in zip(to_cpu(begins), to_cpu(ckeys_pre))])
-        right_spans = F.vstack([_get_span_v(ckey_post, end)
-                                for ckey_post, end
-                                in zip(to_cpu(ckeys_post), to_cpu(ends))])
-        h_b = F.embed_id(begins, hs_flatten)
-        h_b_pre = F.embed_id(begins_pre, hs_flatten, ignore_label=-1)
-        out_of_span = np.insert(to_cpu(lengths[:-1].cumsum()), 0, 0) - 1
-        is_in = np.isin(to_cpu(begins_pre), out_of_span)
-        h_b_pre = F.where(xp.asarray(is_in)[:, None],
-                          xp.zeros_like(h_b_pre.data), h_b_pre)
-        h_e = F.embed_id(ends, hs_flatten)
-        h_e_post = F.embed_id(ends_post, hs_flatten, hs_flatten.shape[0])
-        out_of_span = lengths.cumsum()
-        is_in = np.isin(to_cpu(ends_post), to_cpu(out_of_span))
-        h_e_post = F.where(xp.asarray(is_in)[:, None],
-                           xp.zeros_like(h_e_post.data), h_e_post)
-        h_k_pre = F.embed_id(ckeys_pre, hs_flatten)
-        h_k_post = F.embed_id(ckeys_post, hs_flatten)
-
+    @staticmethod
+    def _feature_sim(hs_flatten, pairs, ckeys, lengths):
+        left_spans, right_spans = FeatureExtractor2._forward_spans(
+            hs_flatten, pairs, ckeys, lengths)
         sim1 = F.absolute(left_spans - right_spans)
         sim2 = left_spans * right_spans
+        return sim1, sim2
+
+    @staticmethod
+    def _feature_repl(hs_flatten, pairs, ckeys, lengths):
+        xp = chainer.cuda.get_array_module(hs_flatten)
+        begins, ends = pairs.T
+        begins_ = xp.asarray(begins)
+        ends_ = xp.asarray(ends)
+        ckeys_ = xp.asarray(ckeys)
+
+        h_b = F.embed_id(begins_, hs_flatten)
+        h_b_pre = F.embed_id(begins_ - 1, hs_flatten, ignore_label=-1)
+        out_of_span = np.insert(lengths[:-1].cumsum(), 0, 0) - 1
+        is_out_of_span = np.isin(begins - 1, out_of_span)
+        h_b_pre = F.where(xp.asarray(is_out_of_span)[:, None],
+                          xp.zeros_like(h_b_pre.data), h_b_pre)
+        h_e = F.embed_id(ends_, hs_flatten)
+        h_e_post = F.embed_id(ends_ + 1, hs_flatten, hs_flatten.shape[0])
+        out_of_span = lengths.cumsum()
+        is_out_of_span = np.isin(ends + 1, out_of_span)
+        h_e_post = F.where(xp.asarray(is_out_of_span)[:, None],
+                           xp.zeros_like(h_e_post.data), h_e_post)
+        h_k_pre = F.embed_id(ckeys_ - 1, hs_flatten)
+        h_k_post = F.embed_id(ckeys_ + 1, hs_flatten)
+
         repl1 = F.absolute(h_b_pre * (h_b - h_k_post))
         repl2 = F.absolute(h_e_post * (h_e - h_k_pre))
-        fs = F.hstack((sim1, sim2, repl1, repl2))
-        return fs
+        return repl1, repl2
+
+    @staticmethod
+    def _forward_spans(hs_flatten, pairs, ckeys, lengths,
+                       use_block=True, block_size=128):
+        xp = chainer.cuda.get_array_module(hs_flatten)
+        begins, ends = pairs.T
+
+        if use_block:
+            def _uniq(start, end):
+                idxs = defaultdict(lambda: len(idxs))
+                offset = np.array([idxs[(s, e)] for s, e in zip(start, end)])
+                start, end = np.array([k for k, v in sorted(
+                    idxs.items(), key=lambda x: x[1])]).T
+                return start, end, offset
+
+            def _sum(start, end):
+                size = len(start)
+                lb, ub = min(start), max(end)
+                hs = hs_flatten[lb: ub]
+                mask = xp.zeros((size, ub - lb, 1), dtype=xp.float32)
+                for i, (s, e) in enumerate(zip(start, end)):
+                    mask[i, s - lb: e - lb] = 1.0
+                return F.sum(hs * mask, axis=1)
+
+            def _extract(start, end):
+                spans = []
+                start, end, offset = _uniq(start, end)
+                ofs, lb, ub = 0, 0, 0
+                for k in range(len(start)):
+                    lb, ub = min(lb, start[k]), max(ub, end[k])
+                    if ub - lb > block_size and k > 0:
+                        spans.append(_sum(start[ofs: k], end[ofs: k]))
+                        ofs, lb, ub = k, start[k], end[k]
+                spans.append(_sum(start[ofs:], end[ofs:]))
+                spans = F.vstack(spans) / xp.asarray(end - start)[:, None]
+                return F.embed_id(xp.asarray(offset), spans)
+
+            left_spans = _extract(begins, ckeys)
+            right_spans = _extract(ckeys + 1, ends + 1)
+        else:
+            @functools.lru_cache(maxsize=None)
+            def _get_span_v(i, j):
+                return F.average(hs_flatten[i:j + 1], axis=0)
+
+            left_spans = F.vstack(
+                [_get_span_v(begin, ckey_pre) for begin, ckey_pre
+                 in zip(begins, ckeys - 1)])
+            right_spans = F.vstack(
+                [_get_span_v(ckey_post, end) for ckey_post, end
+                 in zip(ckeys + 1, ends)])
+
+        return left_spans, right_spans
 
     @property
     def out_size(self):
-        return self.in_size * 4
+        n_features = 2 * max(int(self.use_sim) + int(self.use_repl), 1)
+        return self.in_size * n_features

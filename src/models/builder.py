@@ -4,7 +4,8 @@ from models.feature import FeatureExtractor1
 from models.feature import FeatureExtractor2
 from models.teranishi17 import Teranishi17
 from models.teranishi19 import Teranishi19
-from models.encoder import Encoder
+from models.encoder import BiLSTMEncoder
+from models.encoder import EmbeddingEncoder
 
 from chainer_nn.links.nlp import BertBaseEmbedding
 from chainer_nn.links.nlp import BertLargeEmbedding
@@ -12,14 +13,11 @@ from chainer_nn.links.nlp import ElmoEmbedding
 import numpy as np
 
 
-class CoordSolverBuilder(object):
+class EncoderBuilder(object):
 
     def __init__(self, loader, **kwargs):
-        default_feature2 = 'extractor1' if kwargs.get('arch', 'Teranishi19') \
-            in ('Teranishi19', 'teranishi19') else 'extractor2'
         super().__setattr__('loader', loader)
         super().__setattr__('config', dict(
-            arch='Teranishi19',
             inputs=('postag', 'char'),
             char_feature_size=50,
             char_pad_id=loader.char_pad_id,
@@ -30,12 +28,6 @@ class CoordSolverBuilder(object):
             embeddings_dropout=kwargs.get('dropout', 0.5),
             lstm_dropout=kwargs.get('dropout', 0.5),
             recurrent_dropout=0.0,
-            division='inner_outer',
-            feature1='baseline',
-            feature2=default_feature2,
-            mlp_unit1=kwargs.get('lstm_hidden_size', 512) * 2,
-            mlp_unit2=kwargs.get('lstm_hidden_size', 512) * 2,
-            mlp_dropout=kwargs.get('dropout', 0.5),
         ))
         self.config.update(kwargs)
 
@@ -58,7 +50,73 @@ class CoordSolverBuilder(object):
         return self
 
     def build(self):
-        encoder = self._build_encoder()
+        loader = self.loader
+        inputs = self.inputs
+
+        contextualized_embeddings = None
+        if sum(('elmo' in inputs,
+                'bert-base' in inputs,
+                'bert-large' in inputs)) > 1:
+            raise ValueError(
+                'at most 1 contextualized emebeddings can be chosen')
+        elif 'elmo' in inputs:
+            contextualized_embeddings = ElmoEmbedding(usage='weighted_sum')
+        elif 'bert-base' in inputs:
+            contextualized_embeddings \
+                = BertBaseEmbedding(usage='second_to_last')
+        elif 'bert-large' in inputs:
+            contextualized_embeddings \
+                = BertLargeEmbedding(usage='second_to_last')
+
+        args = [
+            loader.get_embeddings(
+                'word', normalize=lambda W: W / np.std(W)
+                if loader.use_pretrained_embed and np.std(W) > 0. else W),
+            loader.get_embeddings('pos') if 'postag' in inputs else None,
+            loader.get_embeddings('char') if 'char' in inputs else None,
+            contextualized_embeddings,
+            self.char_feature_size,
+            self.char_pad_id,
+            self.char_window_size,
+            self.char_dropout,
+            self.embeddings_dropout,
+        ]
+
+        if self.n_lstm_layers > 0:
+            encoder = BiLSTMEncoder(*(args + [
+                self.n_lstm_layers,
+                self.lstm_hidden_size,
+                self.lstm_dropout,
+                self.recurrent_dropout,
+            ]))
+        else:
+            encoder = EmbeddingEncoder(*args)
+        return encoder
+
+    def __repr__(self):
+        return "{}(loader={}, config={})".format(
+            self.__class__.__name__, repr(self.loader), repr(self.config))
+
+
+class CoordSolverBuilder(EncoderBuilder):
+
+    def __init__(self, loader, **kwargs):
+        super().__init__(loader, **kwargs)
+        default_feature2 = 'extractor1' if kwargs.get('arch', 'Teranishi19') \
+            in ('Teranishi19', 'teranishi19') else 'extractor2'
+        self.config.update(
+            arch='Teranishi19',
+            division='inner_outer',
+            feature1='baseline',
+            feature2=default_feature2,
+            mlp_unit1=kwargs.get('lstm_hidden_size', 512) * 2,
+            mlp_unit2=kwargs.get('lstm_hidden_size', 512) * 2,
+            mlp_dropout=kwargs.get('dropout', 0.5),
+        )
+        self.config.update(kwargs)
+
+    def build(self):
+        encoder = super().build()
 
         extractors = []
         for feature in (self.feature1, self.feature2):
@@ -88,45 +146,3 @@ class CoordSolverBuilder(object):
         else:
             raise ValueError("unknown architecture: {}".format(arch))
         return model
-
-    def _build_encoder(self):
-        loader = self.loader
-        inputs = self.inputs
-
-        contextualized_embeddings = None
-        if sum(('elmo' in inputs,
-                'bert-base' in inputs,
-                'bert-large' in inputs)) > 1:
-            raise ValueError(
-                'at most 1 contextualized emebeddings can be chosen')
-        elif 'elmo' in inputs:
-            contextualized_embeddings = ElmoEmbedding(usage='weighted_sum')
-        elif 'bert-base' in inputs:
-            contextualized_embeddings \
-                = BertBaseEmbedding(usage='second_to_last')
-        elif 'bert-large' in inputs:
-            contextualized_embeddings \
-                = BertLargeEmbedding(usage='second_to_last')
-
-        encoder = Encoder(
-            loader.get_embeddings(
-                'word', normalize=lambda W: W / np.std(W)
-                if loader.use_pretrained_embed and np.std(W) > 0. else W),
-            loader.get_embeddings('pos') if 'postag' in inputs else None,
-            loader.get_embeddings('char') if 'char' in inputs else None,
-            contextualized_embeddings,
-            self.char_feature_size,
-            self.char_pad_id,
-            self.char_window_size,
-            self.char_dropout,
-            self.n_lstm_layers,
-            self.lstm_hidden_size,
-            self.embeddings_dropout,
-            self.lstm_dropout,
-            self.recurrent_dropout,
-        )
-        return encoder
-
-    def __repr__(self):
-        return "{}(loader={}, config={})".format(
-            self.__class__.__name__, repr(self.loader), repr(self.config))
